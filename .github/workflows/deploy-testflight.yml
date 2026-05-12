@@ -1,0 +1,57 @@
+name: Deploy to TestFlight
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".upstream-version"
+      - "fastlane/**"
+      - "scripts/prepare-upstream.sh"
+      - ".github/workflows/deploy-testflight.yml"
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-testflight
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Read pinned upstream tag
+        id: pinned_release
+        run: echo "tag=$(tr -d '[:space:]' < .upstream-version)" >> "${GITHUB_OUTPUT}"
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          working-directory: fastlane
+          ruby-version: "3.4"
+          bundler-cache: true
+
+      - name: Prepare upstream checkout
+        run: scripts/prepare-upstream.sh
+
+      - name: Build and upload to TestFlight
+        working-directory: fastlane
+        env:
+          UPSTREAM_TAG: ${{ steps.pinned_release.outputs.tag }}
+          DEVELOPER_APP_IDENTIFIER:      ${{ secrets.DEVELOPER_APP_IDENTIFIER }}
+          DEVELOPER_PORTAL_TEAM_ID:      ${{ secrets.DEVELOPER_PORTAL_TEAM_ID }}
+          APPLE_KEY_ID:                  ${{ secrets.APPLE_KEY_ID }}
+          APPLE_ISSUER_ID:               ${{ secrets.APPLE_ISSUER_ID }}
+          APPLE_KEY_CONTENT:             ${{ secrets.APPLE_KEY_CONTENT }}
+          MATCH_GIT_URL:                 ${{ secrets.MATCH_GIT_URL }}
+          MATCH_GIT_BASIC_AUTHORIZATION: ${{ secrets.MATCH_GIT_BASIC_AUTHORIZATION }}
+          MATCH_PASSWORD:                ${{ secrets.MATCH_PASSWORD }}
+          TEMP_KEYCHAIN_PASSWORD:        ${{ secrets.TEMP_KEYCHAIN_PASSWORD }}
+        run: bundle exec fastlane ios beta

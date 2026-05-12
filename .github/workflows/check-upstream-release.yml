@@ -1,0 +1,76 @@
+name: Check upstream release
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: check-upstream-release
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      UPSTREAM_REPOSITORY: advplyr/audiobookshelf-app
+      GH_TOKEN: ${{ secrets.RELEASE_BOT_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          token: ${{ secrets.RELEASE_BOT_TOKEN }}
+
+      - name: Resolve latest upstream release tag
+        id: latest_release
+        run: |
+          latest_tag="$(gh release list --repo "${UPSTREAM_REPOSITORY}" --limit 1 --json tagName --jq '.[0].tagName')"
+          if [ -z "${latest_tag}" ] || [ "${latest_tag}" = "null" ]; then
+            echo "::error::could not resolve latest release tag from ${UPSTREAM_REPOSITORY}"
+            exit 1
+          fi
+          echo "tag=${latest_tag}" >> "${GITHUB_OUTPUT}"
+
+      - name: Read pinned upstream tag
+        id: pinned_release
+        run: echo "tag=$(tr -d '[:space:]' < .upstream-version)" >> "${GITHUB_OUTPUT}"
+
+      - name: Compare tags
+        id: compare
+        run: |
+          if [ "${{ steps.latest_release.outputs.tag }}" = "${{ steps.pinned_release.outputs.tag }}" ]; then
+            echo "changed=false" >> "${GITHUB_OUTPUT}"
+          else
+            echo "changed=true" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Open and auto-merge bump pull request
+        if: steps.compare.outputs.changed == 'true'
+        env:
+          PINNED_TAG: ${{ steps.pinned_release.outputs.tag }}
+          LATEST_TAG: ${{ steps.latest_release.outputs.tag }}
+        run: |
+          set -euo pipefail
+          branch_name="bot/bump-upstream-${LATEST_TAG}"
+
+          git config user.name  "audiobookshelf-app bot"
+          git config user.email "audiobookshelf-app-bot@users.noreply.github.com"
+
+          if git ls-remote --exit-code --heads origin "${branch_name}" >/dev/null 2>&1; then
+            echo "branch ${branch_name} already exists on origin; nothing to do"
+            exit 0
+          fi
+
+          git checkout -b "${branch_name}"
+          printf '%s\n' "${LATEST_TAG}" > .upstream-version
+          git add .upstream-version
+          git commit -m "bump upstream audiobookshelf-app to ${LATEST_TAG}"
+          git push --set-upstream origin "${branch_name}"
+
+          pull_request_body=$(printf 'Upstream release [`%s`](https://github.com/%s/releases/tag/%s) is available (was `%s`).\n\nMerging this PR will trigger the **Deploy to TestFlight** workflow.' "${LATEST_TAG}" "${UPSTREAM_REPOSITORY}" "${LATEST_TAG}" "${PINNED_TAG}")
+          pull_request_url=$(gh pr create --base main --head "${branch_name}" --title "Bump audiobookshelf-app to ${LATEST_TAG}" --body "${pull_request_body}")
+          gh pr merge --squash --auto --delete-branch "${pull_request_url}"

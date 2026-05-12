@@ -1,0 +1,186 @@
+require "xcodeproj"
+require "base64"
+
+default_platform(:ios)
+opt_out_usage
+
+def required_env(name, default = nil)
+  value = ENV[name]
+  value = default if value.nil? || value.empty?
+  raise KeyError, "environment variable #{name} is not set" if value.nil?
+  value.strip
+end
+
+DEVELOPER_APP_IDENTIFIER      = required_env("DEVELOPER_APP_IDENTIFIER")
+
+APPLE_KEY_ID                  = required_env("APPLE_KEY_ID")
+APPLE_ISSUER_ID               = required_env("APPLE_ISSUER_ID")
+APPLE_KEY_CONTENT             = required_env("APPLE_KEY_CONTENT")
+
+MATCH_GIT_URL                 = required_env("MATCH_GIT_URL")
+MATCH_GIT_BASIC_AUTHORIZATION = required_env("MATCH_GIT_BASIC_AUTHORIZATION")
+MATCH_PASSWORD                = required_env("MATCH_PASSWORD")
+
+REPOSITORY_ROOT  = File.expand_path("..", __dir__)
+UPSTREAM_ROOT    = File.join(REPOSITORY_ROOT, "upstream")
+IOS_PROJECT_ROOT = File.join(UPSTREAM_ROOT, "ios", "App")
+XCODEPROJ_PATH   = File.join(IOS_PROJECT_ROOT, "App.xcodeproj")
+WORKSPACE_PATH   = File.join(IOS_PROJECT_ROOT, "App.xcworkspace")
+APP_TARGET_NAME  = "App"
+BUILD_OUTPUT_DIR = File.join(REPOSITORY_ROOT, "build")
+
+def build_api_key
+  app_store_connect_api_key(
+    key_id: APPLE_KEY_ID,
+    issuer_id: APPLE_ISSUER_ID,
+    key_content: APPLE_KEY_CONTENT,
+    is_key_content_base64: true,
+    duration: 1200,
+    in_house: false
+  )
+end
+
+# App Store Connect rejects pre-release suffixes in CFBundleShortVersionString.
+def marketing_version_from_tag(tag)
+  tag.sub(/\Av/, "").sub(/-(?:alpha|beta|rc)(?:\.\d+)?\z/, "")
+end
+
+def apply_signing_overrides(xcodeproj_path, bundle_identifier, team_id, provisioning_profile_specifier)
+  project = Xcodeproj::Project.open(xcodeproj_path)
+  target = project.targets.find { |t| t.name == APP_TARGET_NAME }
+  raise "target #{APP_TARGET_NAME} not found in #{xcodeproj_path}" if target.nil?
+
+  target.build_configurations.each do |configuration|
+    configuration.build_settings["PRODUCT_BUNDLE_IDENTIFIER"]      = bundle_identifier
+    configuration.build_settings["DEVELOPMENT_TEAM"]               = team_id
+    configuration.build_settings["CODE_SIGN_STYLE"]                = "Manual"
+    configuration.build_settings["CODE_SIGN_IDENTITY"]             = "Apple Distribution"
+    configuration.build_settings["PROVISIONING_PROFILE_SPECIFIER"] = provisioning_profile_specifier
+  end
+  project.save
+end
+
+def apply_version_overrides(xcodeproj_path, marketing_version, build_number)
+  project = Xcodeproj::Project.open(xcodeproj_path)
+  target = project.targets.find { |t| t.name == APP_TARGET_NAME }
+  raise "target #{APP_TARGET_NAME} not found in #{xcodeproj_path}" if target.nil?
+
+  target.build_configurations.each do |configuration|
+    configuration.build_settings["MARKETING_VERSION"]         = marketing_version
+    configuration.build_settings["CURRENT_PROJECT_VERSION"]   = build_number.to_s
+  end
+  project.save
+end
+
+def ensure_temp_keychain(name, password)
+  keychain_path = File.expand_path("~/Library/Keychains/#{name}-db")
+  delete_keychain(name: name) if File.exist?(keychain_path)
+  create_keychain(
+    name: name,
+    password: password,
+    unlock: true,
+    timeout: 3600,
+    lock_when_sleeps: false
+  )
+end
+
+platform :ios do
+  desc "Bootstrap or refresh the App Store distribution certificate and profile via Match."
+  lane :certificates do
+    temp_keychain_name     = required_env("TEMP_KEYCHAIN_NAME", "fastlane_tmp_keychain")
+    temp_keychain_password = required_env("TEMP_KEYCHAIN_PASSWORD")
+
+    ensure_temp_keychain(temp_keychain_name, temp_keychain_password)
+
+    match(
+      type: "appstore",
+      app_identifier: DEVELOPER_APP_IDENTIFIER,
+      git_url: MATCH_GIT_URL,
+      git_basic_authorization: Base64.strict_encode64(MATCH_GIT_BASIC_AUTHORIZATION),
+      readonly: false,
+      keychain_name: temp_keychain_name,
+      keychain_password: temp_keychain_password,
+      api_key: build_api_key
+    )
+  ensure
+    if temp_keychain_name && File.exist?(File.expand_path("~/Library/Keychains/#{temp_keychain_name}-db"))
+      delete_keychain(name: temp_keychain_name)
+    end
+  end
+
+  desc "Build the prepared upstream checkout and upload to TestFlight."
+  lane :beta do
+    developer_portal_team_id = required_env("DEVELOPER_PORTAL_TEAM_ID")
+    temp_keychain_name       = required_env("TEMP_KEYCHAIN_NAME", "fastlane_tmp_keychain")
+    temp_keychain_password   = required_env("TEMP_KEYCHAIN_PASSWORD")
+    upstream_tag             = required_env("UPSTREAM_TAG")
+
+    unless File.directory?(UPSTREAM_ROOT)
+      UI.user_error!("upstream/ not found — run scripts/prepare-upstream.sh first")
+    end
+
+    ensure_temp_keychain(temp_keychain_name, temp_keychain_password)
+
+    api_key = build_api_key
+    provisioning_profile_specifier = "match AppStore #{DEVELOPER_APP_IDENTIFIER}"
+
+    apply_signing_overrides(
+      XCODEPROJ_PATH,
+      DEVELOPER_APP_IDENTIFIER,
+      developer_portal_team_id,
+      provisioning_profile_specifier
+    )
+
+    match(
+      type: "appstore",
+      app_identifier: DEVELOPER_APP_IDENTIFIER,
+      git_url: MATCH_GIT_URL,
+      git_basic_authorization: Base64.strict_encode64(MATCH_GIT_BASIC_AUTHORIZATION),
+      readonly: false,
+      keychain_name: temp_keychain_name,
+      keychain_password: temp_keychain_password,
+      api_key: api_key
+    )
+
+    marketing_version = marketing_version_from_tag(upstream_tag)
+    next_build_number = latest_testflight_build_number(
+      api_key: api_key,
+      app_identifier: DEVELOPER_APP_IDENTIFIER,
+      version: marketing_version,
+      initial_build_number: 0
+    ).to_i + 1
+
+    apply_version_overrides(XCODEPROJ_PATH, marketing_version, next_build_number)
+
+    build_app(
+      workspace: WORKSPACE_PATH,
+      scheme: APP_TARGET_NAME,
+      configuration: "Release",
+      export_method: "app-store",
+      export_options: {
+        provisioningProfiles: {
+          DEVELOPER_APP_IDENTIFIER => provisioning_profile_specifier
+        }
+      },
+      xcargs: "-allowProvisioningUpdates",
+      output_directory: BUILD_OUTPUT_DIR,
+      output_name: "App.ipa",
+      clean: true
+    )
+
+    upload_to_testflight(
+      api_key: api_key,
+      app_identifier: DEVELOPER_APP_IDENTIFIER,
+      ipa: File.join(BUILD_OUTPUT_DIR, "App.ipa"),
+      skip_waiting_for_build_processing: true,
+      skip_submission: true,
+      distribute_external: false,
+      notify_external_testers: false,
+      changelog: "Upstream #{upstream_tag}"
+    )
+  ensure
+    if temp_keychain_name && File.exist?(File.expand_path("~/Library/Keychains/#{temp_keychain_name}-db"))
+      delete_keychain(name: temp_keychain_name)
+    end
+  end
+end
