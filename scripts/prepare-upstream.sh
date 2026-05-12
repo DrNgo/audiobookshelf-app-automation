@@ -30,6 +30,17 @@ echo "==> generating Nuxt web bundle"
 echo "==> syncing Capacitor iOS project"
 (cd "${upstream_directory}" && npx cap sync ios)
 
+echo "==> pinning pod deployment target so xcode 26 doesn't bake the sdk version into swiftmodules"
+ruby -i -pe '
+  if $_.include?("assertDeploymentTarget(installer)")
+    $_ << "  installer.pods_project.targets.each do |target|\n"
+    $_ << "    target.build_configurations.each do |config|\n"
+    $_ << "      config.build_settings[\"IPHONEOS_DEPLOYMENT_TARGET\"] = \"14.0\"\n"
+    $_ << "    end\n"
+    $_ << "  end\n"
+  end
+' "${upstream_directory}/ios/App/Podfile"
+
 echo "==> running pod install"
 (cd "${upstream_directory}/ios/App" && pod install)
 
