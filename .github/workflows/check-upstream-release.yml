@@ -73,4 +73,5 @@ jobs:
 
           pull_request_body=$(printf 'Upstream release [`%s`](https://github.com/%s/releases/tag/%s) is available (was `%s`).\n\nMerging this PR will trigger the **Deploy to TestFlight** workflow.' "${LATEST_TAG}" "${UPSTREAM_REPOSITORY}" "${LATEST_TAG}" "${PINNED_TAG}")
           pull_request_url=$(gh pr create --base main --head "${branch_name}" --title "Bump audiobookshelf-app to ${LATEST_TAG}" --body "${pull_request_body}")
-          gh pr merge --squash --auto --delete-branch "${pull_request_url}"
+          gh pr merge --squash --auto --delete-branch "${pull_request_url}" \
+            || gh pr merge --squash --delete-branch "${pull_request_url}"
