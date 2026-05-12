@@ -61,6 +61,24 @@ The `certificates` lane uses the App Store Connect API key (no Apple ID prompt),
 
 After that succeeds, copy every secret listed above into GitHub Actions secrets and trigger the **Deploy to TestFlight** workflow manually to confirm CI works end-to-end.
 
+## Secret and certificate rotation
+
+Nothing in this stack emails you on expiry — set calendar reminders when you create each one. Recommended practice: add a `<SECRET_NAME>_EXPIRES_ON` custom field (date) alongside the secret in the same Bitwarden item.
+
+| Secret / artifact | Lifetime | Failure signature when expired |
+| --- | --- | --- |
+| `RELEASE_BOT_TOKEN` | as set on the fine-grained PAT (1 year recommended) | **Check upstream release** workflow fails at `gh release list` with a 401 |
+| `MATCH_GIT_BASIC_AUTHORIZATION` | as set on the Match PAT (1 year recommended) | Deploy fails inside `match` with a 401 cloning the certs repo |
+| `APPLE_KEY_*` (App Store Connect API key) | no automatic expiry; only revoked manually | Deploy fails with `Authentication credentials are missing or invalid` |
+| App Store distribution certificate | 1 year (Apple) | Build fails during code signing — `match` reports no valid certificate |
+| Provisioning profile (`match AppStore <bundle-id>`) | 1 year (Apple) | Same as the certificate |
+
+To rotate certificate / profile, re-run `bundle exec fastlane certificates` locally — Match detects the expired material in the certs repo and regenerates everything in-place. To rotate a PAT, regenerate it on GitHub and replace the value in **Settings → Secrets → Actions** (and the Bitwarden custom field). To rotate the API key, revoke and recreate in App Store Connect, then re-do step 1.3 from the initial setup.
+
+## TestFlight build expiry
+
+Apple expires TestFlight builds 90 days after upload. The **Deploy to TestFlight** workflow runs on a `cron: "0 10 1 */2 *"` schedule (every two months, on the 1st at 10:00 UTC) to rebuild the currently pinned `.upstream-version` and refresh the expiry — even when no upstream release has landed.
+
 ## Bumping upstream manually
 
 ```sh

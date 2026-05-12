@@ -8,6 +8,8 @@ on:
       - "fastlane/**"
       - "scripts/prepare-upstream.sh"
       - ".github/workflows/deploy-testflight.yml"
+  schedule:
+    - cron: "0 10 1 */2 *"
   workflow_dispatch: {}
 
 concurrency:
@@ -38,8 +40,26 @@ jobs:
           ruby-version: "3.4"
           bundler-cache: true
 
-      - name: Prepare upstream checkout
-        run: scripts/prepare-upstream.sh
+      - name: Clone upstream
+        run: scripts/prepare-upstream.sh clone
+
+      - name: Restore upstream dependency caches
+        uses: actions/cache@v5
+        with:
+          path: |
+            upstream/node_modules
+            upstream/ios/App/Pods
+            ~/Library/Caches/CocoaPods
+          key: ${{ runner.os }}-upstream-${{ steps.pinned_release.outputs.tag }}-${{ hashFiles('upstream/package-lock.json', 'upstream/ios/App/Podfile.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-upstream-${{ steps.pinned_release.outputs.tag }}-
+            ${{ runner.os }}-upstream-
+
+      - name: Build web bundle
+        run: scripts/prepare-upstream.sh web
+
+      - name: Prepare iOS Pods
+        run: scripts/prepare-upstream.sh ios
 
       - name: Build and upload to TestFlight
         working-directory: fastlane
