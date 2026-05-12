@@ -39,6 +39,18 @@ build_web_bundle() {
   (cd "${upstream_directory}" && npx cap sync ios)
 }
 
+mark_encryption_exempt() {
+  local info_plist_path="${upstream_directory}/ios/App/App/Info.plist"
+  if [[ ! -f "${info_plist_path}" ]]; then
+    echo "error: ${info_plist_path} not found" >&2
+    exit 1
+  fi
+
+  echo "==> declaring ITSAppUsesNonExemptEncryption=false so testflight skips the export compliance prompt"
+  plutil -remove ITSAppUsesNonExemptEncryption "${info_plist_path}" 2>/dev/null || true
+  plutil -insert ITSAppUsesNonExemptEncryption -bool NO "${info_plist_path}"
+}
+
 prepare_ios_pods() {
   echo "==> pinning pod deployment target so xcode 26 doesn't bake the sdk version into swiftmodules"
   ruby -i -pe '
@@ -59,10 +71,14 @@ phase="${1:-all}"
 case "${phase}" in
   clone) clone_upstream ;;
   web)   build_web_bundle ;;
-  ios)   prepare_ios_pods ;;
+  ios)
+    mark_encryption_exempt
+    prepare_ios_pods
+    ;;
   all)
     clone_upstream
     build_web_bundle
+    mark_encryption_exempt
     prepare_ios_pods
     ;;
   *)
