@@ -26,7 +26,8 @@ UPSTREAM_ROOT    = File.join(REPOSITORY_ROOT, "upstream")
 IOS_PROJECT_ROOT = File.join(UPSTREAM_ROOT, "ios", "App")
 XCODEPROJ_PATH   = File.join(IOS_PROJECT_ROOT, "App.xcodeproj")
 WORKSPACE_PATH   = File.join(IOS_PROJECT_ROOT, "App.xcworkspace")
-APP_TARGET_NAME  = "App"
+APP_TARGET_NAME  = "Audiobookshelf"
+APP_SCHEME_NAME  = "App"
 BUILD_OUTPUT_DIR = File.join(REPOSITORY_ROOT, "build")
 
 def build_api_key
@@ -154,7 +155,7 @@ platform :ios do
 
     build_app(
       workspace: WORKSPACE_PATH,
-      scheme: APP_TARGET_NAME,
+      scheme: APP_SCHEME_NAME,
       configuration: "Release",
       export_method: "app-store",
       export_options: {
