@@ -4,7 +4,7 @@ Builds the iOS app from [advplyr/audiobookshelf-app](https://github.com/advplyr/
 
 ## How it works
 
-1. **`check-upstream-release.yml`** runs every 6 hours and on-demand. It compares the upstream's latest release tag against `.upstream-version`. If they differ, it opens a PR bumping `.upstream-version` and enables auto-merge on it.
+1. **`check-upstream-release.yml`** runs every 24 hours and on-demand. It compares the upstream's latest release tag against `.upstream-version`. If they differ, it opens a PR bumping `.upstream-version` and enables auto-merge on it.
 2. The merge lands a push on `main` touching `.upstream-version`.
 3. **`deploy-testflight.yml`** triggers on that push: it clones upstream at the pinned tag, runs `npm ci && npm run generate && npx cap sync ios && pod install`, then runs the `ios beta` fastlane lane to sign with Match, build with `gym`, and upload to TestFlight via `pilot`.
 
