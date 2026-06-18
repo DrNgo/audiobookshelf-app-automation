@@ -123,14 +123,6 @@ platform :ios do
     ensure_temp_keychain(temp_keychain_name, temp_keychain_password)
 
     api_key = build_api_key
-    provisioning_profile_specifier = "match AppStore #{DEVELOPER_APP_IDENTIFIER}"
-
-    apply_signing_overrides(
-      XCODEPROJ_PATH,
-      DEVELOPER_APP_IDENTIFIER,
-      developer_portal_team_id,
-      provisioning_profile_specifier
-    )
 
     match(
       type: "appstore",
@@ -141,6 +133,19 @@ platform :ios do
       keychain_name: temp_keychain_name,
       keychain_password: temp_keychain_password,
       api_key: api_key
+    )
+
+    # Use the profile name Match actually installed. Apple appends a numeric
+    # suffix when a profile with the base name already exists, so the name
+    # cannot be assumed from the bundle identifier.
+    provisioning_profile_specifier =
+      lane_context[SharedValues::MATCH_PROVISIONING_PROFILE_MAPPING][DEVELOPER_APP_IDENTIFIER]
+
+    apply_signing_overrides(
+      XCODEPROJ_PATH,
+      DEVELOPER_APP_IDENTIFIER,
+      developer_portal_team_id,
+      provisioning_profile_specifier
     )
 
     marketing_version = marketing_version_from_tag(upstream_tag)
