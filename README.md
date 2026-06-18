@@ -73,7 +73,9 @@ Nothing in this stack emails you on expiry — set calendar reminders when you c
 | App Store distribution certificate | 1 year (Apple) | Build fails during code signing — `match` reports no valid certificate |
 | Provisioning profile (`match AppStore <bundle-id>`) | 1 year (Apple) | Same as the certificate |
 
-To rotate certificate / profile, re-run `bundle exec fastlane certificates` locally — Match detects the expired material in the certs repo and regenerates everything in-place. To rotate a PAT, regenerate it on GitHub and replace the value in **Settings → Secrets → Actions** (and the Bitwarden custom field). To rotate the API key, revoke and recreate in App Store Connect, then re-do step 1.3 from the initial setup.
+To rotate certificate / profile, run the **Rotate certificates** workflow from the Actions tab (`workflow_dispatch`) — it runs the `certificates` lane on a CI runner using the same secrets as the deploy workflow, and Match detects the expired material in the certs repo and regenerates everything in-place. The workflow also runs monthly on a `cron: "0 10 5 * *"` schedule; because Match only regenerates missing or expired material, the scheduled run is a no-op while the cert is still valid, so it effectively self-heals within a month of expiry. To rotate locally instead, run `bundle exec fastlane certificates`.
+
+To rotate a PAT, regenerate it on GitHub and replace the value in **Settings → Secrets → Actions** (and the Bitwarden custom field). To rotate the API key, revoke and recreate in App Store Connect, then re-do step 1.3 from the initial setup. Neither can be fully automated: GitHub fine-grained PATs and App Store Connect API keys have no creation API, so minting the new credential is always a manual step.
 
 ## TestFlight build expiry
 

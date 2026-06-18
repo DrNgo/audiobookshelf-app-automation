@@ -1,0 +1,41 @@
+name: Rotate certificates
+
+on:
+  schedule:
+    # Monthly, on the 5th at 10:00 UTC. Match regenerates the App Store
+    # distribution cert and profile only when the existing material is missing
+    # or expired, so running while they are still valid is a no-op.
+    - cron: "0 10 5 * *"
+  workflow_dispatch: {}
+
+concurrency:
+  group: rotate-certificates
+  cancel-in-progress: false
+
+jobs:
+  certificates:
+    runs-on: macos-26
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          working-directory: fastlane
+          ruby-version: "3.4"
+          bundler-cache: true
+
+      - name: Rotate certificate and provisioning profile
+        working-directory: fastlane
+        env:
+          DEVELOPER_APP_IDENTIFIER:      ${{ secrets.DEVELOPER_APP_IDENTIFIER }}
+          APPLE_KEY_ID:                  ${{ secrets.APPLE_KEY_ID }}
+          APPLE_ISSUER_ID:               ${{ secrets.APPLE_ISSUER_ID }}
+          APPLE_KEY_CONTENT:             ${{ secrets.APPLE_KEY_CONTENT }}
+          MATCH_GIT_URL:                 ${{ secrets.MATCH_GIT_URL }}
+          MATCH_GIT_BASIC_AUTHORIZATION: ${{ secrets.MATCH_GIT_BASIC_AUTHORIZATION }}
+          MATCH_PASSWORD:                ${{ secrets.MATCH_PASSWORD }}
+          TEMP_KEYCHAIN_PASSWORD:        ${{ secrets.TEMP_KEYCHAIN_PASSWORD }}
+        run: bundle exec fastlane ios certificates
