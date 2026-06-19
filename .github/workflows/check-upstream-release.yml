@@ -61,15 +61,23 @@ jobs:
           git config user.email "audiobookshelf-app-bot@users.noreply.github.com"
 
           if git ls-remote --exit-code --heads origin "${branch_name}" >/dev/null 2>&1; then
-            echo "branch ${branch_name} already exists on origin; nothing to do"
-            exit 0
+            # The branch already exists. If an open PR exists too, the gate is
+            # already pending and there is nothing to do. Otherwise a prior run
+            # pushed the branch but failed to open the PR — fall through and
+            # create it so the build gate always has a PR to run on. (The bump
+            # commit is already on the branch, so no new commit is needed.)
+            if [ -n "$(gh pr list --head "${branch_name}" --base main --state open --json number --jq '.[0].number // empty')" ]; then
+              echo "open PR already exists for ${branch_name}; nothing to do"
+              exit 0
+            fi
+            echo "branch ${branch_name} exists without an open PR; creating it"
+          else
+            git checkout -b "${branch_name}"
+            printf '%s\n' "${LATEST_TAG}" > .upstream-version
+            git add .upstream-version
+            git commit -m "bump upstream audiobookshelf-app to ${LATEST_TAG}"
+            git push --set-upstream origin "${branch_name}"
           fi
-
-          git checkout -b "${branch_name}"
-          printf '%s\n' "${LATEST_TAG}" > .upstream-version
-          git add .upstream-version
-          git commit -m "bump upstream audiobookshelf-app to ${LATEST_TAG}"
-          git push --set-upstream origin "${branch_name}"
 
           pull_request_body=$(printf 'Upstream release [`%s`](https://github.com/%s/releases/tag/%s) is available (was `%s`).\n\nThe **Deploy to TestFlight** build gate will build this PR and, once the build is green, merge it automatically. The merge then triggers a deploy that reuses the build instead of rebuilding.' "${LATEST_TAG}" "${UPSTREAM_REPOSITORY}" "${LATEST_TAG}" "${PINNED_TAG}")
           gh pr create --base main --head "${branch_name}" --title "Bump audiobookshelf-app to ${LATEST_TAG}" --body "${pull_request_body}"

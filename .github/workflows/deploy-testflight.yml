@@ -102,12 +102,22 @@ jobs:
           retention-days: 5
           if-no-files-found: error
 
-      # Merge only the bot's bump PR, and only after a green build. Uses the PAT
-      # so the resulting push to main triggers the deploy job (the default
-      # GITHUB_TOKEN cannot trigger another workflow). Human PRs are left for
-      # manual merge.
+      # Merge only the bot's bump PR, and only after a green build. The branch
+      # name alone is not trusted (a PR's head ref is attacker-controllable), so
+      # require the PR to originate from this repo — only a write-access actor
+      # can push a same-repo branch, and fork PRs get no signing secrets anyway.
+      # Uses the PAT so the resulting push to main triggers the deploy job (the
+      # default GITHUB_TOKEN cannot trigger another workflow). Human PRs are left
+      # for manual merge.
+      #
+      # NOTE: do NOT make this build_pr job a required status check under branch
+      # protection. This step merges from within the same job, so a required
+      # self-check would never be green at merge time and would deadlock.
       - name: Merge bump PR
-        if: success() && startsWith(github.head_ref, 'bot/bump-upstream-')
+        if: >-
+          success()
+          && github.event.pull_request.head.repo.full_name == github.repository
+          && startsWith(github.event.pull_request.head.ref, 'bot/bump-upstream-')
         env:
           GH_TOKEN: ${{ secrets.RELEASE_BOT_TOKEN }}
         run: gh pr merge --squash --delete-branch "${{ github.event.pull_request.number }}"
@@ -149,6 +159,9 @@ jobs:
       - name: Find reusable IPA artifact
         id: reuse
         if: github.event_name == 'push'
+        # A transient artifact-API failure must not fail the deploy — leave
+        # 'found' unset so the job falls through to a full build.
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           ARTIFACT_NAME: ${{ steps.artifact.outputs.name }}
