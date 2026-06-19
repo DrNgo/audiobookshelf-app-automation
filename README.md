@@ -4,11 +4,14 @@ Builds the iOS app from [advplyr/audiobookshelf-app](https://github.com/advplyr/
 
 ## How it works
 
-1. **`check-upstream-release.yml`** runs every 24 hours and on-demand. It compares the upstream's latest release tag against `.upstream-version`. If they differ, it opens a PR bumping `.upstream-version` and enables auto-merge on it.
-2. The merge lands a push on `main` touching `.upstream-version`.
-3. **`deploy-testflight.yml`** triggers on that push: it clones upstream at the pinned tag, runs `npm ci && npm run generate && npx cap sync ios && pod install`, then runs the `ios beta` fastlane lane to sign with Match, build with `gym`, and upload to TestFlight via `pilot`.
+1. **`check-upstream-release.yml`** runs every 24 hours and on-demand. It compares the upstream's latest release tag against `.upstream-version`. If they differ, it opens a PR bumping `.upstream-version` (it does **not** merge it).
+2. **`deploy-testflight.yml`** builds the PR as a gate: it clones upstream at the new tag, runs `npm ci && npm run generate && npx cap sync ios && pod install`, then runs the `ios build` fastlane lane to sign with Match and build with `gym`. The resulting `.ipa` is stashed as a build artifact. **A broken upstream release fails here and never merges** — `main` stays on the last known-good version.
+3. When the build is green, the same job merges the bump PR (using `RELEASE_BOT_TOKEN`, so the merge push can trigger the next step). The merge lands a push on `main` touching `.upstream-version`.
+4. The `deploy` job triggers on that push and **reuses the artifact built in step 2** — it downloads the `.ipa` and runs only the `ios upload` lane (`pilot`) instead of rebuilding. If no matching artifact is found, or the upload is rejected (e.g. a duplicate build number), it falls back to a full `ios beta` build.
 
-You can also dispatch `deploy-testflight.yml` manually from the Actions tab to redeploy the currently pinned version.
+The artifact is matched by a content hash of `.upstream-version`, `fastlane/**`, `scripts/prepare-upstream.sh`, and the deploy workflow, so an artifact is only reused when it corresponds exactly to what landed on `main`.
+
+You can also dispatch `deploy-testflight.yml` manually from the Actions tab, and it runs on a bimonthly schedule (see [TestFlight build expiry](#testflight-build-expiry)); both of those always do a full rebuild rather than reusing an artifact.
 
 **`rotate-certificates.yml`** keeps signing material valid without any manual intervention. It runs the `certificates` fastlane lane on a CI runner — monthly on a `cron: "0 10 5 * *"` schedule and on-demand via `workflow_dispatch`. Match only regenerates expired or missing certs and profiles, so the scheduled run is a no-op while the current material is valid; it effectively self-heals within a month of expiry. See [Secret and certificate rotation](#secret-and-certificate-rotation) for details.
 
@@ -27,7 +30,7 @@ You can also dispatch `deploy-testflight.yml` manually from the Actions tab to r
 
 | Secret                          | Where to get it                                                                                                                                                                                                                |
 | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `RELEASE_BOT_TOKEN`             | Fine-grained personal access token with **Contents: read/write** and **Pull requests: read/write** on this repo. Required so bump PRs trigger the deploy workflow (the default `GITHUB_TOKEN` cannot trigger other workflows). |
+| `RELEASE_BOT_TOKEN`             | Fine-grained personal access token with **Contents: read/write** and **Pull requests: read/write** on this repo. Required so the build gate can merge bump PRs and have the merge trigger the deploy workflow (the default `GITHUB_TOKEN` cannot trigger other workflows). |
 | `DEVELOPER_APP_IDENTIFIER`      | Your reverse-DNS bundle identifier (e.g. `com.example.audiobookshelf`).                                                                                                                                                        |
 | `DEVELOPER_PORTAL_TEAM_ID`      | 10-character team ID from [developer.apple.com → Account → Membership](https://developer.apple.com/account).                                                                                                                   |
 | `APPLE_KEY_ID`                  | App Store Connect API key ID. Create at [App Store Connect → Users and Access → Integrations → App Store Connect API → Team Keys](https://appstoreconnect.apple.com/access/api). Use **Admin** or **App Manager** role.        |

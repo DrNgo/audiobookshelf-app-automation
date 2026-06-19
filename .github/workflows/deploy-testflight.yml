@@ -1,6 +1,14 @@
 name: Deploy to TestFlight
 
 on:
+  pull_request:
+    # The bump PR (and any human PR touching the build inputs) is built before
+    # it can land. fastlane/** is intentionally excluded: Dependabot PRs get no
+    # signing secrets, so gating them on a signed build would wedge Dependabot.
+    paths:
+      - ".upstream-version"
+      - "scripts/prepare-upstream.sh"
+      - ".github/workflows/deploy-testflight.yml"
   push:
     branches: [main]
     paths:
@@ -12,14 +20,20 @@ on:
     - cron: "0 10 1 */2 *"
   workflow_dispatch: {}
 
-concurrency:
-  group: deploy-testflight
-  cancel-in-progress: false
-
 jobs:
-  deploy:
+  # Gate: build the bump PR before it can land. On success the IPA is stashed as
+  # an artifact and the bot's bump PR is merged (via the PAT, so the merge push
+  # triggers the deploy job), which then reuses the artifact instead of
+  # rebuilding. A broken upstream release fails here and never merges.
+  build_pr:
+    if: github.event_name == 'pull_request'
     runs-on: macos-26
     timeout-minutes: 60
+    permissions:
+      contents: read
+    concurrency:
+      group: build-pr-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -27,6 +41,10 @@ jobs:
       - name: Read pinned upstream tag
         id: pinned_release
         run: echo "tag=$(tr -d '[:space:]' < .upstream-version)" >> "${GITHUB_OUTPUT}"
+
+      - name: Compute artifact name
+        id: artifact
+        run: echo "name=app-ipa-${{ hashFiles('.upstream-version', 'fastlane/**', 'scripts/prepare-upstream.sh', '.github/workflows/deploy-testflight.yml') }}" >> "${GITHUB_OUTPUT}"
 
       - name: Setup Node
         uses: actions/setup-node@v6
@@ -61,7 +79,171 @@ jobs:
       - name: Prepare iOS Pods
         run: scripts/prepare-upstream.sh ios
 
+      - name: Build IPA
+        working-directory: fastlane
+        env:
+          UPSTREAM_TAG: ${{ steps.pinned_release.outputs.tag }}
+          DEVELOPER_APP_IDENTIFIER:      ${{ secrets.DEVELOPER_APP_IDENTIFIER }}
+          DEVELOPER_PORTAL_TEAM_ID:      ${{ secrets.DEVELOPER_PORTAL_TEAM_ID }}
+          APPLE_KEY_ID:                  ${{ secrets.APPLE_KEY_ID }}
+          APPLE_ISSUER_ID:               ${{ secrets.APPLE_ISSUER_ID }}
+          APPLE_KEY_CONTENT:             ${{ secrets.APPLE_KEY_CONTENT }}
+          MATCH_GIT_URL:                 ${{ secrets.MATCH_GIT_URL }}
+          MATCH_GIT_BASIC_AUTHORIZATION: ${{ secrets.MATCH_GIT_BASIC_AUTHORIZATION }}
+          MATCH_PASSWORD:                ${{ secrets.MATCH_PASSWORD }}
+          TEMP_KEYCHAIN_PASSWORD:        ${{ secrets.TEMP_KEYCHAIN_PASSWORD }}
+        run: bundle exec fastlane ios build
+
+      - name: Stash IPA for the deploy job to reuse
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.artifact.outputs.name }}
+          path: build/App.ipa
+          retention-days: 5
+          if-no-files-found: error
+
+      # Merge only the bot's bump PR, and only after a green build. Uses the PAT
+      # so the resulting push to main triggers the deploy job (the default
+      # GITHUB_TOKEN cannot trigger another workflow). Human PRs are left for
+      # manual merge.
+      - name: Merge bump PR
+        if: success() && startsWith(github.head_ref, 'bot/bump-upstream-')
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_BOT_TOKEN }}
+        run: gh pr merge --squash --delete-branch "${{ github.event.pull_request.number }}"
+
+  # Deploy: triggered by the merge push (reuses the PR-built IPA), the bimonthly
+  # schedule, or manual dispatch (the latter two always rebuild fresh).
+  deploy:
+    if: github.event_name != 'pull_request'
+    runs-on: macos-26
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: read
+    concurrency:
+      group: deploy-testflight
+      cancel-in-progress: false
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Read pinned upstream tag
+        id: pinned_release
+        run: echo "tag=$(tr -d '[:space:]' < .upstream-version)" >> "${GITHUB_OUTPUT}"
+
+      - name: Compute artifact name
+        id: artifact
+        run: echo "name=app-ipa-${{ hashFiles('.upstream-version', 'fastlane/**', 'scripts/prepare-upstream.sh', '.github/workflows/deploy-testflight.yml') }}" >> "${GITHUB_OUTPUT}"
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          working-directory: fastlane
+          ruby-version: "3.4"
+          bundler-cache: true
+
+      # Only a merge push may reuse a PR-built IPA. Scheduled and dispatch runs
+      # must rebuild so the bimonthly redeploy produces a fresh build that
+      # actually refreshes the 90-day TestFlight expiry.
+      - name: Find reusable IPA artifact
+        id: reuse
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ARTIFACT_NAME: ${{ steps.artifact.outputs.name }}
+        run: |
+          set -euo pipefail
+          artifact_id="$(gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts?name=${ARTIFACT_NAME}&per_page=100" \
+            --jq '[.artifacts[] | select(.expired == false)] | sort_by(.created_at) | last | .id // empty')"
+          if [ -n "${artifact_id}" ]; then
+            echo "found=true" >> "${GITHUB_OUTPUT}"
+            echo "artifact_id=${artifact_id}" >> "${GITHUB_OUTPUT}"
+            echo "reusing artifact ${ARTIFACT_NAME} (id ${artifact_id})"
+          else
+            echo "found=false" >> "${GITHUB_OUTPUT}"
+            echo "no reusable artifact named ${ARTIFACT_NAME}; will rebuild"
+          fi
+
+      - name: Download reusable IPA
+        id: download
+        if: steps.reuse.outputs.found == 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ARTIFACT_ID: ${{ steps.reuse.outputs.artifact_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}/zip" > artifact.zip
+          unzip -o artifact.zip -d build
+          test -f build/App.ipa
+
+      - name: Upload reused IPA to TestFlight
+        id: upload
+        if: steps.download.outcome == 'success'
+        continue-on-error: true
+        working-directory: fastlane
+        env:
+          UPSTREAM_TAG: ${{ steps.pinned_release.outputs.tag }}
+          DEVELOPER_APP_IDENTIFIER:      ${{ secrets.DEVELOPER_APP_IDENTIFIER }}
+          DEVELOPER_PORTAL_TEAM_ID:      ${{ secrets.DEVELOPER_PORTAL_TEAM_ID }}
+          APPLE_KEY_ID:                  ${{ secrets.APPLE_KEY_ID }}
+          APPLE_ISSUER_ID:               ${{ secrets.APPLE_ISSUER_ID }}
+          APPLE_KEY_CONTENT:             ${{ secrets.APPLE_KEY_CONTENT }}
+          MATCH_GIT_URL:                 ${{ secrets.MATCH_GIT_URL }}
+          MATCH_GIT_BASIC_AUTHORIZATION: ${{ secrets.MATCH_GIT_BASIC_AUTHORIZATION }}
+          MATCH_PASSWORD:                ${{ secrets.MATCH_PASSWORD }}
+          TEMP_KEYCHAIN_PASSWORD:        ${{ secrets.TEMP_KEYCHAIN_PASSWORD }}
+        run: bundle exec fastlane ios upload
+
+      # Full build path: reuse was skipped (schedule/dispatch), no artifact was
+      # found, the download failed, or the reused upload failed (e.g. a duplicate
+      # build number). A fresh build recomputes the build number.
+      - name: Decide whether a full build is needed
+        id: decide
+        run: |
+          if [ "${{ steps.upload.outcome }}" = "success" ]; then
+            echo "build=false" >> "${GITHUB_OUTPUT}"
+            echo "reused a PR-built IPA; skipping full build"
+          else
+            echo "build=true" >> "${GITHUB_OUTPUT}"
+            echo "building from upstream sources"
+          fi
+
+      - name: Setup Node
+        if: steps.decide.outputs.build == 'true'
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Clone upstream
+        if: steps.decide.outputs.build == 'true'
+        run: scripts/prepare-upstream.sh clone
+
+      - name: Restore upstream dependency caches
+        if: steps.decide.outputs.build == 'true'
+        uses: actions/cache@v5
+        with:
+          path: |
+            upstream/node_modules
+            upstream/ios/App/Pods
+            ~/Library/Caches/CocoaPods
+          key: ${{ runner.os }}-upstream-${{ steps.pinned_release.outputs.tag }}-${{ hashFiles('upstream/package-lock.json', 'upstream/ios/App/Podfile.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-upstream-${{ steps.pinned_release.outputs.tag }}-
+            ${{ runner.os }}-upstream-
+
+      - name: Build web bundle
+        if: steps.decide.outputs.build == 'true'
+        run: scripts/prepare-upstream.sh web
+
+      - name: Prepare iOS Pods
+        if: steps.decide.outputs.build == 'true'
+        run: scripts/prepare-upstream.sh ios
+
       - name: Build and upload to TestFlight
+        if: steps.decide.outputs.build == 'true'
         working-directory: fastlane
         env:
           UPSTREAM_TAG: ${{ steps.pinned_release.outputs.tag }}
