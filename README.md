@@ -10,6 +10,8 @@ Builds the iOS app from [advplyr/audiobookshelf-app](https://github.com/advplyr/
 
 You can also dispatch `deploy-testflight.yml` manually from the Actions tab to redeploy the currently pinned version.
 
+**`rotate-certificates.yml`** keeps signing material valid without any local action. It runs the `certificates` fastlane lane on a CI runner — monthly on a `cron: "0 10 5 * *"` schedule and on-demand via `workflow_dispatch`. Match only regenerates expired or missing certs and profiles, so the scheduled run is a no-op while the current material is valid; it effectively self-heals within a month of expiry. See [Secret and certificate rotation](#secret-and-certificate-rotation) for details.
+
 **Dependabot** keeps GitHub Actions and Ruby gems fresh. Minor and patch updates auto-merge via `.github/workflows/auto-merge-dependabot.yml`; major updates wait for manual review. For auto-merge to work, enable **Settings → General → Pull Requests → Allow auto-merge** on the repository.
 
 ## Prerequisites
@@ -36,34 +38,21 @@ You can also dispatch `deploy-testflight.yml` manually from the Actions tab to r
 | `MATCH_PASSWORD`                | Passphrase used to encrypt the Match repository contents. Pick any long random string the first time you run Match; remember it.                                                                                               |
 | `TEMP_KEYCHAIN_PASSWORD`        | Any long random string. Used as the password for the ephemeral keychain created on the CI runner.                                                                                                                              |
 
-## Local secrets via direnv + Bitwarden
-
-`flake.nix` provides Ruby 3.4 + bundler + CocoaPods + Node 22, and `.envrc` resolves every secret from a single Bitwarden item named `audiobookshelf-app testflight` via `helpers/bitwarden.sh`. `use flake` evaluates the dev shell automatically when nix-direnv is enabled.
-
-1. Install [Nix](https://nixos.org/) (with flakes), [direnv](https://direnv.net/) + `nix-direnv`, the [Bitwarden CLI](https://bitwarden.com/help/cli/), and `jq`.
-2. Create one Bitwarden Login item named `audiobookshelf-app testflight`. Add a **custom field** for each variable in the secrets table above. Two gotchas:
-   - Strip any leading or trailing whitespace from every value — Bitwarden preserves it and an extra space in `DEVELOPER_APP_IDENTIFIER` will make match fail with `Could not find App ID`.
-   - `APPLE_KEY_CONTENT` must be the base64 of the **same** `.p8` whose ID is in `APPLE_KEY_ID`. Generate with `base64 -i ~/Downloads/AuthKey_<KEYID>.p8` and paste the single-line output. The `.p8` file is downloadable only once at key-creation time — if you've lost it, revoke the key and create a new one.
-3. From this repo: `direnv allow` (only needed once; subsequent `cd` entries auto-load).
-4. Verify with `echo "$DEVELOPER_APP_IDENTIFIER"` — should print your bundle id with no trailing newline noise.
-
 ## First-run setup
 
-Once direnv has loaded the secrets, populate the private Match repo with a fresh App Store distribution cert and provisioning profile:
+Everything runs on GitHub — no local toolchain or checkout is required to get the workflows working.
 
-```sh
-cd fastlane
-bundle install
-bundle exec fastlane certificates
-```
+1. **Add the secrets.** Under **Settings → Secrets and variables → Actions**, add every secret from the [Required GitHub Actions secrets](#required-github-actions-secrets) table. Two gotchas:
+   - Strip any leading or trailing whitespace from each value — an extra space in `DEVELOPER_APP_IDENTIFIER` makes Match fail with `Could not find App ID`.
+   - `APPLE_KEY_CONTENT` must be the base64 of the **same** `.p8` whose ID is in `APPLE_KEY_ID`. Generate with `base64 -i ~/Downloads/AuthKey_<KEYID>.p8` and paste the single-line output. The `.p8` is downloadable only once at key-creation time — if you've lost it, revoke the key and create a new one.
+2. **Seed the Match repo.** Run the **Rotate certificates** workflow from the Actions tab (Run workflow → `workflow_dispatch`). Because the private Match repo starts empty, the `certificates` lane generates a fresh App Store distribution cert + provisioning profile and pushes them encrypted. The lane authenticates with the App Store Connect API key (no Apple ID prompt) and uses an ephemeral keychain on the runner; the resulting profile is named `match AppStore <bundle-id>`.
+3. **Confirm end-to-end.** Trigger the **Deploy to TestFlight** workflow manually to build the currently pinned `.upstream-version` and upload it to TestFlight.
 
-The `certificates` lane uses the App Store Connect API key (no Apple ID prompt), creates an ephemeral keychain (no macOS login prompt), imports the cert into it, and pushes the encrypted cert + profile to your private match repo. The profile is named `match AppStore <bundle-id>`.
-
-After that succeeds, copy every secret listed above into GitHub Actions secrets and trigger the **Deploy to TestFlight** workflow manually to confirm CI works end-to-end.
+Once step 3 succeeds, the pipeline is fully autonomous: upstream releases deploy on their own, builds refresh on schedule, and signing material self-rotates.
 
 ## Secret and certificate rotation
 
-Nothing in this stack emails you on expiry — set calendar reminders when you create each one. Recommended practice: add a `<SECRET_NAME>_EXPIRES_ON` custom field (date) alongside the secret in the same Bitwarden item.
+Nothing in this stack emails you on expiry — set calendar reminders when you create each one, and note each expiry date wherever you keep the secret values.
 
 | Secret / artifact | Lifetime | Failure signature when expired |
 | --- | --- | --- |
@@ -75,7 +64,7 @@ Nothing in this stack emails you on expiry — set calendar reminders when you c
 
 To rotate certificate / profile, run the **Rotate certificates** workflow from the Actions tab (`workflow_dispatch`) — it runs the `certificates` lane on a CI runner using the same secrets as the deploy workflow, and Match detects the expired material in the certs repo and regenerates everything in-place. The workflow also runs monthly on a `cron: "0 10 5 * *"` schedule; because Match only regenerates missing or expired material, the scheduled run is a no-op while the cert is still valid, so it effectively self-heals within a month of expiry. To rotate locally instead, run `bundle exec fastlane certificates`.
 
-To rotate a PAT, regenerate it on GitHub and replace the value in **Settings → Secrets → Actions** (and the Bitwarden custom field). To rotate the API key, revoke and recreate in App Store Connect, then re-do step 1.3 from the initial setup. Neither can be fully automated: GitHub fine-grained PATs and App Store Connect API keys have no creation API, so minting the new credential is always a manual step.
+To rotate a PAT, regenerate it on GitHub and replace the value under **Settings → Secrets and variables → Actions**. To rotate the API key, revoke and recreate it in App Store Connect, then update the `APPLE_KEY_*` secrets as in step 1 of first-run setup. Neither can be fully automated: GitHub fine-grained PATs and App Store Connect API keys have no creation API, so minting the new credential is always a manual step.
 
 ## TestFlight build expiry
 
