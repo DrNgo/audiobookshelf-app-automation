@@ -10,7 +10,7 @@ Builds the iOS app from [advplyr/audiobookshelf-app](https://github.com/advplyr/
 
 You can also dispatch `deploy-testflight.yml` manually from the Actions tab to redeploy the currently pinned version.
 
-**`rotate-certificates.yml`** keeps signing material valid without any local action. It runs the `certificates` fastlane lane on a CI runner — monthly on a `cron: "0 10 5 * *"` schedule and on-demand via `workflow_dispatch`. Match only regenerates expired or missing certs and profiles, so the scheduled run is a no-op while the current material is valid; it effectively self-heals within a month of expiry. See [Secret and certificate rotation](#secret-and-certificate-rotation) for details.
+**`rotate-certificates.yml`** keeps signing material valid without any manual intervention. It runs the `certificates` fastlane lane on a CI runner — monthly on a `cron: "0 10 5 * *"` schedule and on-demand via `workflow_dispatch`. Match only regenerates expired or missing certs and profiles, so the scheduled run is a no-op while the current material is valid; it effectively self-heals within a month of expiry. See [Secret and certificate rotation](#secret-and-certificate-rotation) for details.
 
 **Dependabot** keeps GitHub Actions and Ruby gems fresh. Minor and patch updates auto-merge via `.github/workflows/auto-merge-dependabot.yml`; major updates wait for manual review. For auto-merge to work, enable **Settings → General → Pull Requests → Allow auto-merge** on the repository.
 
@@ -40,7 +40,7 @@ You can also dispatch `deploy-testflight.yml` manually from the Actions tab to r
 
 ## First-run setup
 
-Everything runs on GitHub — no local toolchain or checkout is required to get the workflows working.
+Everything runs on GitHub — all setup is done through the repository settings and the Actions tab.
 
 1. **Add the secrets.** Under **Settings → Secrets and variables → Actions**, add every secret from the [Required GitHub Actions secrets](#required-github-actions-secrets) table. Two gotchas:
    - Strip any leading or trailing whitespace from each value — an extra space in `DEVELOPER_APP_IDENTIFIER` makes Match fail with `Could not find App ID`.
@@ -62,7 +62,7 @@ Nothing in this stack emails you on expiry — set calendar reminders when you c
 | App Store distribution certificate | 1 year (Apple) | Build fails during code signing — `match` reports no valid certificate |
 | Provisioning profile (`match AppStore <bundle-id>`) | 1 year (Apple) | Same as the certificate |
 
-To rotate certificate / profile, run the **Rotate certificates** workflow from the Actions tab (`workflow_dispatch`) — it runs the `certificates` lane on a CI runner using the same secrets as the deploy workflow, and Match detects the expired material in the certs repo and regenerates everything in-place. The workflow also runs monthly on a `cron: "0 10 5 * *"` schedule; because Match only regenerates missing or expired material, the scheduled run is a no-op while the cert is still valid, so it effectively self-heals within a month of expiry. To rotate locally instead, run `bundle exec fastlane certificates`.
+To rotate certificate / profile, run the **Rotate certificates** workflow from the Actions tab (`workflow_dispatch`) — it runs the `certificates` lane on a CI runner using the same secrets as the deploy workflow, and Match detects the expired material in the certs repo and regenerates everything in-place. The workflow also runs monthly on a `cron: "0 10 5 * *"` schedule; because Match only regenerates missing or expired material, the scheduled run is a no-op while the cert is still valid, so it effectively self-heals within a month of expiry.
 
 To rotate a PAT, regenerate it on GitHub and replace the value under **Settings → Secrets and variables → Actions**. To rotate the API key, revoke and recreate it in App Store Connect, then update the `APPLE_KEY_*` secrets as in step 1 of first-run setup. Neither can be fully automated: GitHub fine-grained PATs and App Store Connect API keys have no creation API, so minting the new credential is always a manual step.
 
@@ -80,16 +80,3 @@ git push
 ```
 
 The deploy workflow will run on push to `main`.
-
-## Local deploy
-
-Runs the same pipeline CI runs — clone upstream, build, upload to TestFlight:
-
-```sh
-export UPSTREAM_TAG="$(cat .upstream-version)"
-scripts/prepare-upstream.sh
-cd fastlane
-bundle exec fastlane ios beta
-```
-
-The signed `.ipa` is uploaded to TestFlight and also left at `build/App.ipa`.
