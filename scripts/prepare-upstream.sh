@@ -4,28 +4,36 @@ set -euo pipefail
 repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 upstream_directory="${repository_root}/upstream"
 upstream_version_file="${repository_root}/.upstream-version"
-upstream_repository_url="${UPSTREAM_REPOSITORY_URL:-https://github.com/advplyr/audiobookshelf-app.git}"
+upstream_repository_url="${UPSTREAM_REPOSITORY_URL:-https://github.com/DrNgo/audiobookshelf-app.git}"
 
-read_upstream_tag() {
+read_upstream_ref() {
   if [[ ! -f "${upstream_version_file}" ]]; then
     echo "error: ${upstream_version_file} not found" >&2
     exit 1
   fi
-  local upstream_tag
-  upstream_tag="$(tr -d '[:space:]' < "${upstream_version_file}")"
-  if [[ -z "${upstream_tag}" ]]; then
+  local upstream_ref
+  upstream_ref="$(tr -d '[:space:]' < "${upstream_version_file}")"
+  if [[ -z "${upstream_ref}" ]]; then
     echo "error: ${upstream_version_file} is empty" >&2
     exit 1
   fi
-  printf '%s' "${upstream_tag}"
+  printf '%s' "${upstream_ref}"
 }
 
 clone_upstream() {
-  local upstream_tag
-  upstream_tag="$(read_upstream_tag)"
-  echo "==> cloning ${upstream_repository_url} at ${upstream_tag}"
+  local upstream_ref
+  upstream_ref="$(read_upstream_ref)"
+  echo "==> fetching ${upstream_repository_url} at ${upstream_ref}"
   rm -rf "${upstream_directory}"
-  git clone --depth 1 --branch "${upstream_tag}" "${upstream_repository_url}" "${upstream_directory}"
+  # .upstream-version pins an exact commit SHA (see check-upstream-release.yml),
+  # so fetch that object directly rather than cloning a branch/tag. `git fetch
+  # <ref>` also accepts a branch or tag name, so a manual bump to either still
+  # works; `git clone --branch`, by contrast, rejects a raw SHA. GitHub allows
+  # fetching an arbitrary reachable commit by SHA (allowAnySHA1InWant).
+  git init -q "${upstream_directory}"
+  git -C "${upstream_directory}" remote add origin "${upstream_repository_url}"
+  git -C "${upstream_directory}" fetch -q --depth 1 origin "${upstream_ref}"
+  git -C "${upstream_directory}" checkout -q FETCH_HEAD
 }
 
 build_web_bundle() {

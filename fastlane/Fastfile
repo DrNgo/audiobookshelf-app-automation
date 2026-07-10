@@ -1,5 +1,6 @@
 require "xcodeproj"
 require "base64"
+require "json"
 
 default_platform(:ios)
 opt_out_usage
@@ -42,8 +43,22 @@ def build_api_key
 end
 
 # App Store Connect rejects pre-release suffixes in CFBundleShortVersionString.
-def marketing_version_from_tag(tag)
-  tag.sub(/\Av/, "").sub(/-(?:alpha|beta|rc)(?:\.\d+)?\z/, "")
+def normalize_marketing_version(version)
+  version.sub(/\Av/, "").sub(/-(?:alpha|beta|rc)(?:\.\d+)?\z/, "")
+end
+
+# The build is pinned to a commit SHA (.upstream-version), not a release tag, so
+# the marketing version comes from the checked-out app itself. package.json is
+# the source of truth for the app version (e.g. "0.13.0-beta"); TestFlight build
+# numbers auto-increment within that normalized version.
+def upstream_marketing_version
+  package_json_path = File.join(UPSTREAM_ROOT, "package.json")
+  unless File.exist?(package_json_path)
+    UI.user_error!("#{package_json_path} not found — run scripts/prepare-upstream.sh first")
+  end
+  raw_version = JSON.parse(File.read(package_json_path))["version"].to_s.strip
+  UI.user_error!("no \"version\" in #{package_json_path}") if raw_version.empty?
+  normalize_marketing_version(raw_version)
 end
 
 def apply_signing_overrides(xcodeproj_path, bundle_identifier, team_id, provisioning_profile_specifier)
@@ -91,7 +106,6 @@ def build_upstream_ipa
   developer_portal_team_id = required_env("DEVELOPER_PORTAL_TEAM_ID")
   temp_keychain_name       = required_env("TEMP_KEYCHAIN_NAME", "fastlane_tmp_keychain")
   temp_keychain_password   = required_env("TEMP_KEYCHAIN_PASSWORD")
-  upstream_tag             = required_env("UPSTREAM_TAG")
 
   unless File.directory?(UPSTREAM_ROOT)
     UI.user_error!("upstream/ not found — run scripts/prepare-upstream.sh first")
@@ -125,7 +139,7 @@ def build_upstream_ipa
     provisioning_profile_specifier
   )
 
-  marketing_version = marketing_version_from_tag(upstream_tag)
+  marketing_version = upstream_marketing_version
   next_build_number = latest_testflight_build_number(
     api_key: api_key,
     app_identifier: DEVELOPER_APP_IDENTIFIER,
@@ -160,7 +174,7 @@ end
 # version are baked into the .ipa at build time, so this needs no checkout,
 # keychain, or upstream sources — only the App Store Connect API key.
 def upload_built_ipa
-  upstream_tag = required_env("UPSTREAM_TAG")
+  upstream_ref = required_env("UPSTREAM_TAG")
   ipa_path = File.join(BUILD_OUTPUT_DIR, "App.ipa")
 
   unless File.exist?(ipa_path)
@@ -175,7 +189,7 @@ def upload_built_ipa
     skip_submission: true,
     distribute_external: false,
     notify_external_testers: false,
-    changelog: "Upstream #{upstream_tag}"
+    changelog: "audiobookshelf-app @ #{upstream_ref[0, 12]}"
   )
 end
 

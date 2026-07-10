@@ -1,4 +1,4 @@
-name: Check upstream release
+name: Check upstream commit
 
 on:
   schedule:
@@ -17,7 +17,10 @@ jobs:
   check:
     runs-on: ubuntu-latest
     env:
-      UPSTREAM_REPOSITORY: advplyr/audiobookshelf-app
+      # The fork we build and ship. .upstream-version pins an exact commit on
+      # UPSTREAM_BRANCH; this job bumps it whenever that branch advances.
+      UPSTREAM_REPOSITORY: DrNgo/audiobookshelf-app
+      UPSTREAM_BRANCH: master
       GH_TOKEN: ${{ secrets.RELEASE_BOT_TOKEN }}
     steps:
       - name: Checkout
@@ -25,24 +28,24 @@ jobs:
         with:
           token: ${{ secrets.RELEASE_BOT_TOKEN }}
 
-      - name: Resolve latest upstream release tag
-        id: latest_release
+      - name: Resolve latest fork commit
+        id: latest_commit
         run: |
-          latest_tag="$(gh release list --repo "${UPSTREAM_REPOSITORY}" --limit 1 --json tagName --jq '.[0].tagName')"
-          if [ -z "${latest_tag}" ] || [ "${latest_tag}" = "null" ]; then
-            echo "::error::could not resolve latest release tag from ${UPSTREAM_REPOSITORY}"
+          latest_sha="$(gh api "repos/${UPSTREAM_REPOSITORY}/commits/${UPSTREAM_BRANCH}" --jq '.sha')"
+          if [ -z "${latest_sha}" ] || [ "${latest_sha}" = "null" ]; then
+            echo "::error::could not resolve HEAD of ${UPSTREAM_REPOSITORY}@${UPSTREAM_BRANCH}"
             exit 1
           fi
-          echo "tag=${latest_tag}" >> "${GITHUB_OUTPUT}"
+          echo "sha=${latest_sha}" >> "${GITHUB_OUTPUT}"
 
-      - name: Read pinned upstream tag
-        id: pinned_release
-        run: echo "tag=$(tr -d '[:space:]' < .upstream-version)" >> "${GITHUB_OUTPUT}"
+      - name: Read pinned commit
+        id: pinned_commit
+        run: echo "sha=$(tr -d '[:space:]' < .upstream-version)" >> "${GITHUB_OUTPUT}"
 
-      - name: Compare tags
+      - name: Compare commits
         id: compare
         run: |
-          if [ "${{ steps.latest_release.outputs.tag }}" = "${{ steps.pinned_release.outputs.tag }}" ]; then
+          if [ "${{ steps.latest_commit.outputs.sha }}" = "${{ steps.pinned_commit.outputs.sha }}" ]; then
             echo "changed=false" >> "${GITHUB_OUTPUT}"
           else
             echo "changed=true" >> "${GITHUB_OUTPUT}"
@@ -51,11 +54,12 @@ jobs:
       - name: Open bump pull request
         if: steps.compare.outputs.changed == 'true'
         env:
-          PINNED_TAG: ${{ steps.pinned_release.outputs.tag }}
-          LATEST_TAG: ${{ steps.latest_release.outputs.tag }}
+          PINNED_SHA: ${{ steps.pinned_commit.outputs.sha }}
+          LATEST_SHA: ${{ steps.latest_commit.outputs.sha }}
         run: |
           set -euo pipefail
-          branch_name="bot/bump-upstream-${LATEST_TAG}"
+          short_sha="${LATEST_SHA:0:12}"
+          branch_name="bot/bump-upstream-${short_sha}"
 
           git config user.name  "audiobookshelf-app bot"
           git config user.email "audiobookshelf-app-bot@users.noreply.github.com"
@@ -73,11 +77,11 @@ jobs:
             echo "branch ${branch_name} exists without an open PR; creating it"
           else
             git checkout -b "${branch_name}"
-            printf '%s\n' "${LATEST_TAG}" > .upstream-version
+            printf '%s\n' "${LATEST_SHA}" > .upstream-version
             git add .upstream-version
-            git commit -m "bump upstream audiobookshelf-app to ${LATEST_TAG}"
+            git commit -m "bump upstream audiobookshelf-app to ${short_sha}"
             git push --set-upstream origin "${branch_name}"
           fi
 
-          pull_request_body=$(printf 'Upstream release [`%s`](https://github.com/%s/releases/tag/%s) is available (was `%s`).\n\nThe **Deploy to TestFlight** build gate will build this PR and, once the build is green, merge it automatically. The merge then triggers a deploy that reuses the build instead of rebuilding.' "${LATEST_TAG}" "${UPSTREAM_REPOSITORY}" "${LATEST_TAG}" "${PINNED_TAG}")
-          gh pr create --base main --head "${branch_name}" --title "Bump audiobookshelf-app to ${LATEST_TAG}" --body "${pull_request_body}"
+          pull_request_body=$(printf 'Fork branch `%s` advanced to [`%s`](https://github.com/%s/commit/%s) (was `%s`).\n\nThe **Deploy to TestFlight** build gate will build this PR and, once the build is green, merge it automatically. The merge then triggers a deploy that reuses the build instead of rebuilding.' "${UPSTREAM_BRANCH}" "${short_sha}" "${UPSTREAM_REPOSITORY}" "${LATEST_SHA}" "${PINNED_SHA:0:12}")
+          gh pr create --base main --head "${branch_name}" --title "Bump audiobookshelf-app to ${short_sha}" --body "${pull_request_body}"

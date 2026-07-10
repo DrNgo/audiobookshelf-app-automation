@@ -1,11 +1,11 @@
 # audiobookshelf-app TestFlight pipeline
 
-Builds the iOS app from [advplyr/audiobookshelf-app](https://github.com/advplyr/audiobookshelf-app) and uploads it to a private TestFlight, automatically, every time upstream cuts a new release.
+Builds the iOS app from [DrNgo/audiobookshelf-app](https://github.com/DrNgo/audiobookshelf-app) — the `master` branch of my fork — and uploads it to a private TestFlight, automatically, every time that branch advances. `.upstream-version` pins the exact commit SHA currently shipped.
 
 ## How it works
 
-1. **`check-upstream-release.yml`** runs every 24 hours and on-demand. It compares the upstream's latest release tag against `.upstream-version`. If they differ, it opens a PR bumping `.upstream-version` (it does **not** merge it).
-2. **`deploy-testflight.yml`** builds the PR as a gate: it clones upstream at the new tag, runs `npm ci && npm run generate && npx cap sync ios && pod install`, then runs the `ios build` fastlane lane to sign with Match and build with `gym`. The resulting `.ipa` is stashed as a build artifact. **A broken upstream release fails here and never merges** — `main` stays on the last known-good version.
+1. **`check-upstream-release.yml`** runs every 24 hours and on-demand. It compares the fork branch's HEAD commit SHA against the SHA pinned in `.upstream-version`. If they differ, it opens a PR bumping `.upstream-version` (it does **not** merge it).
+2. **`deploy-testflight.yml`** builds the PR as a gate: it checks out the fork at the pinned commit, runs `npm ci && npm run generate && npx cap sync ios && pod install`, then runs the `ios build` fastlane lane to sign with Match and build with `gym`. The resulting `.ipa` is stashed as a build artifact. **A broken commit fails here and never merges** — `main` stays on the last known-good commit.
 3. When the build is green, the same job merges the bump PR (using `RELEASE_BOT_TOKEN`, so the merge push can trigger the next step). The merge lands a push on `main` touching `.upstream-version`.
 4. The `deploy` job triggers on that push and **reuses the artifact built in step 2** — it downloads the `.ipa` and runs only the `ios upload` lane (`pilot`) instead of rebuilding. If no matching artifact is found, or the upload is rejected (e.g. a duplicate build number), it falls back to a full `ios beta` build.
 
@@ -30,7 +30,7 @@ You can also dispatch `deploy-testflight.yml` manually from the Actions tab, and
 
 | Secret                          | Where to get it                                                                                                                                                                                                                |
 | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `RELEASE_BOT_TOKEN`             | Fine-grained personal access token with **Contents: read/write** and **Pull requests: read/write** on this repo. Required so the build gate can merge bump PRs and have the merge trigger the deploy workflow (the default `GITHUB_TOKEN` cannot trigger other workflows). |
+| `RELEASE_BOT_TOKEN`             | Fine-grained personal access token with **Contents: read/write** and **Pull requests: read/write** on this repo. Required so the build gate can merge bump PRs and have the merge trigger the deploy workflow (the default `GITHUB_TOKEN` cannot trigger other workflows). The fork it reads (`DrNgo/audiobookshelf-app`) is public, so no extra scope is needed to poll its commits. |
 | `DEVELOPER_APP_IDENTIFIER`      | Your reverse-DNS bundle identifier (e.g. `com.example.audiobookshelf`).                                                                                                                                                        |
 | `DEVELOPER_PORTAL_TEAM_ID`      | 10-character team ID from [developer.apple.com → Account → Membership](https://developer.apple.com/account).                                                                                                                   |
 | `APPLE_KEY_ID`                  | App Store Connect API key ID. Create at [App Store Connect → Users and Access → Integrations → App Store Connect API → Team Keys](https://appstoreconnect.apple.com/access/api). Use **Admin** or **App Manager** role.        |
@@ -59,7 +59,7 @@ Nothing in this stack emails you on expiry — set calendar reminders when you c
 
 | Secret / artifact | Lifetime | Failure signature when expired |
 | --- | --- | --- |
-| `RELEASE_BOT_TOKEN` | as set on the fine-grained PAT (1 year recommended) | **Check upstream release** workflow fails at `gh release list` with a 401 |
+| `RELEASE_BOT_TOKEN` | as set on the fine-grained PAT (1 year recommended) | **Check upstream commit** workflow fails at `gh api .../commits` (or the bump `git push`) with a 401 |
 | `MATCH_GIT_BASIC_AUTHORIZATION` | as set on the Match PAT (1 year recommended) | Deploy fails inside `match` with a 401 cloning the certs repo |
 | `APPLE_KEY_*` (App Store Connect API key) | no automatic expiry; only revoked manually | Deploy fails with `Authentication credentials are missing or invalid` |
 | App Store distribution certificate | 1 year (Apple) | Build fails during code signing — `match` reports no valid certificate |
@@ -71,15 +71,20 @@ To rotate a PAT, regenerate it on GitHub and replace the value under **Settings 
 
 ## TestFlight build expiry
 
-Apple expires TestFlight builds 90 days after upload. The **Deploy to TestFlight** workflow runs on a `cron: "0 10 1 */2 *"` schedule (every two months, on the 1st at 10:00 UTC) to rebuild the currently pinned `.upstream-version` and refresh the expiry — even when no upstream release has landed.
+Apple expires TestFlight builds 90 days after upload. The **Deploy to TestFlight** workflow runs on a `cron: "0 10 1 */2 *"` schedule (every two months, on the 1st at 10:00 UTC) to rebuild the currently pinned `.upstream-version` and refresh the expiry — even when the fork branch hasn't advanced.
 
-## Bumping upstream manually
+## Bumping the pinned commit manually
+
+Normally the **Check upstream commit** workflow does this for you when `master` advances. To force a specific commit (or to build a different branch of the fork), pin it directly:
 
 ```sh
-echo v0.13.1-beta > .upstream-version
+# a full commit SHA on the fork...
+echo 185cba16eb122b40e8537a7bf475632680d6fb94 > .upstream-version
+# ...or a branch/tag name, which prepare-upstream.sh also accepts:
+# echo fix/download-reliability > .upstream-version
 git add .upstream-version
-git commit -m "bump upstream audiobookshelf-app to v0.13.1-beta"
+git commit -m "pin audiobookshelf-app to <ref>"
 git push
 ```
 
-The deploy workflow will run on push to `main`.
+The deploy workflow will run on push to `main`. Note the daily poll compares against `master`'s HEAD, so if you pin a one-off commit the next poll will still try to bump you back onto `master`.
