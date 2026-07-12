@@ -1,4 +1,10 @@
 git_url(ENV["MATCH_GIT_URL"]) if ENV["MATCH_GIT_URL"]
 storage_mode("git")
 type("appstore")
-app_identifier([ENV["DEVELOPER_APP_IDENTIFIER"]].compact)
+
+# Provision the app AND its widget extension. The widget's bundle id is derived from the app-id secret
+# ("<app id>.widget") unless DEVELOPER_WIDGET_APP_IDENTIFIER overrides it — never a hardcoded id.
+app_id = ENV["DEVELOPER_APP_IDENTIFIER"]
+widget_id = ENV["DEVELOPER_WIDGET_APP_IDENTIFIER"]
+widget_id = "#{app_id}.widget" if (widget_id.nil? || widget_id.empty?) && app_id && !app_id.empty?
+app_identifier([app_id, widget_id].compact)

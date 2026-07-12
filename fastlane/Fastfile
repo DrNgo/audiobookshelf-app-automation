@@ -13,6 +13,12 @@ def required_env(name, default = nil)
 end
 
 DEVELOPER_APP_IDENTIFIER      = required_env("DEVELOPER_APP_IDENTIFIER")
+# The home/lock-screen widget ships as an app-extension target. Apple requires an extension's bundle
+# id to be prefixed by its host app's, so it defaults to "<app id>.widget" derived from the app-id
+# secret — never a hardcoded bundle id. Override with DEVELOPER_WIDGET_APP_IDENTIFIER if the portal's
+# widget App ID differs. Its App Store profile must carry the shared App Group capability
+# (group.com.audiobookshelf.app), which the app and widget use to exchange the server URL + token.
+WIDGET_APP_IDENTIFIER         = required_env("DEVELOPER_WIDGET_APP_IDENTIFIER", "#{DEVELOPER_APP_IDENTIFIER}.widget")
 
 APPLE_KEY_ID                  = required_env("APPLE_KEY_ID")
 APPLE_ISSUER_ID               = required_env("APPLE_ISSUER_ID")
@@ -27,8 +33,9 @@ UPSTREAM_ROOT    = File.join(REPOSITORY_ROOT, "upstream")
 IOS_PROJECT_ROOT = File.join(UPSTREAM_ROOT, "ios", "App")
 XCODEPROJ_PATH   = File.join(IOS_PROJECT_ROOT, "App.xcodeproj")
 WORKSPACE_PATH   = File.join(IOS_PROJECT_ROOT, "App.xcworkspace")
-APP_TARGET_NAME  = "Audiobookshelf"
-APP_SCHEME_NAME  = "App"
+APP_TARGET_NAME    = "Audiobookshelf"
+WIDGET_TARGET_NAME = "AudiobookshelfWidget"
+APP_SCHEME_NAME    = "App"
 BUILD_OUTPUT_DIR = File.join(REPOSITORY_ROOT, "build")
 
 def build_api_key
@@ -61,30 +68,43 @@ def upstream_marketing_version
   normalize_marketing_version(raw_version)
 end
 
-def apply_signing_overrides(xcodeproj_path, bundle_identifier, team_id, provisioning_profile_specifier)
+# Apply manual App Store signing to one or more targets. `signing_by_target` maps a target name to a
+# hash of { bundle_identifier:, team_id:, provisioning_profile_specifier: }. The app AND its widget
+# extension must each be signed with their own bundle id + profile.
+def apply_signing_overrides(xcodeproj_path, signing_by_target)
   project = Xcodeproj::Project.open(xcodeproj_path)
-  target = project.targets.find { |t| t.name == APP_TARGET_NAME }
-  raise "target #{APP_TARGET_NAME} not found in #{xcodeproj_path}" if target.nil?
 
-  target.build_configurations.each do |configuration|
-    configuration.build_settings["PRODUCT_BUNDLE_IDENTIFIER"]      = bundle_identifier
-    configuration.build_settings["DEVELOPMENT_TEAM"]               = team_id
-    configuration.build_settings["CODE_SIGN_STYLE"]                = "Manual"
-    configuration.build_settings["CODE_SIGN_IDENTITY"]             = "Apple Distribution"
-    configuration.build_settings["PROVISIONING_PROFILE_SPECIFIER"] = provisioning_profile_specifier
+  signing_by_target.each do |target_name, settings|
+    target = project.targets.find { |t| t.name == target_name }
+    raise "target #{target_name} not found in #{xcodeproj_path}" if target.nil?
+
+    target.build_configurations.each do |configuration|
+      configuration.build_settings["PRODUCT_BUNDLE_IDENTIFIER"]      = settings.fetch(:bundle_identifier)
+      configuration.build_settings["DEVELOPMENT_TEAM"]               = settings.fetch(:team_id)
+      configuration.build_settings["CODE_SIGN_STYLE"]                = "Manual"
+      configuration.build_settings["CODE_SIGN_IDENTITY"]             = "Apple Distribution"
+      configuration.build_settings["PROVISIONING_PROFILE_SPECIFIER"] = settings.fetch(:provisioning_profile_specifier)
+    end
   end
+
   project.save
 end
 
-def apply_version_overrides(xcodeproj_path, marketing_version, build_number)
+# Stamp the same marketing version + build number onto every given target. The widget extension must
+# match its host app's CFBundleShortVersionString/CFBundleVersion or App Store Connect rejects the upload.
+def apply_version_overrides(xcodeproj_path, marketing_version, build_number, target_names)
   project = Xcodeproj::Project.open(xcodeproj_path)
-  target = project.targets.find { |t| t.name == APP_TARGET_NAME }
-  raise "target #{APP_TARGET_NAME} not found in #{xcodeproj_path}" if target.nil?
 
-  target.build_configurations.each do |configuration|
-    configuration.build_settings["MARKETING_VERSION"]         = marketing_version
-    configuration.build_settings["CURRENT_PROJECT_VERSION"]   = build_number.to_s
+  target_names.each do |target_name|
+    target = project.targets.find { |t| t.name == target_name }
+    raise "target #{target_name} not found in #{xcodeproj_path}" if target.nil?
+
+    target.build_configurations.each do |configuration|
+      configuration.build_settings["MARKETING_VERSION"]       = marketing_version
+      configuration.build_settings["CURRENT_PROJECT_VERSION"] = build_number.to_s
+    end
   end
+
   project.save
 end
 
@@ -115,9 +135,11 @@ def build_upstream_ipa
 
   api_key = build_api_key
 
+  # Provision both the app and its widget extension. Each needs its own App Store profile; the widget's
+  # must carry the shared App Group capability.
   match(
     type: "appstore",
-    app_identifier: DEVELOPER_APP_IDENTIFIER,
+    app_identifier: [DEVELOPER_APP_IDENTIFIER, WIDGET_APP_IDENTIFIER],
     git_url: MATCH_GIT_URL,
     git_basic_authorization: Base64.strict_encode64(MATCH_GIT_BASIC_AUTHORIZATION),
     readonly: false,
@@ -126,17 +148,27 @@ def build_upstream_ipa
     api_key: api_key
   )
 
-  # Use the profile name Match actually installed. Apple appends a numeric
+  # Use the profile names Match actually installed. Apple appends a numeric
   # suffix when a profile with the base name already exists, so the name
   # cannot be assumed from the bundle identifier.
-  provisioning_profile_specifier =
-    lane_context[SharedValues::MATCH_PROVISIONING_PROFILE_MAPPING][DEVELOPER_APP_IDENTIFIER]
+  profile_mapping = lane_context[SharedValues::MATCH_PROVISIONING_PROFILE_MAPPING]
+  app_profile_specifier    = profile_mapping[DEVELOPER_APP_IDENTIFIER]
+  widget_profile_specifier = profile_mapping[WIDGET_APP_IDENTIFIER]
 
   apply_signing_overrides(
     XCODEPROJ_PATH,
-    DEVELOPER_APP_IDENTIFIER,
-    developer_portal_team_id,
-    provisioning_profile_specifier
+    {
+      APP_TARGET_NAME => {
+        bundle_identifier: DEVELOPER_APP_IDENTIFIER,
+        team_id: developer_portal_team_id,
+        provisioning_profile_specifier: app_profile_specifier
+      },
+      WIDGET_TARGET_NAME => {
+        bundle_identifier: WIDGET_APP_IDENTIFIER,
+        team_id: developer_portal_team_id,
+        provisioning_profile_specifier: widget_profile_specifier
+      }
+    }
   )
 
   marketing_version = upstream_marketing_version
@@ -147,7 +179,7 @@ def build_upstream_ipa
     initial_build_number: 0
   ).to_i + 1
 
-  apply_version_overrides(XCODEPROJ_PATH, marketing_version, next_build_number)
+  apply_version_overrides(XCODEPROJ_PATH, marketing_version, next_build_number, [APP_TARGET_NAME, WIDGET_TARGET_NAME])
 
   build_app(
     workspace: WORKSPACE_PATH,
@@ -156,7 +188,8 @@ def build_upstream_ipa
     export_method: "app-store",
     export_options: {
       provisioningProfiles: {
-        DEVELOPER_APP_IDENTIFIER => provisioning_profile_specifier
+        DEVELOPER_APP_IDENTIFIER => app_profile_specifier,
+        WIDGET_APP_IDENTIFIER    => widget_profile_specifier
       }
     },
     xcargs: "-allowProvisioningUpdates",
@@ -203,7 +236,7 @@ platform :ios do
 
     match(
       type: "appstore",
-      app_identifier: DEVELOPER_APP_IDENTIFIER,
+      app_identifier: [DEVELOPER_APP_IDENTIFIER, WIDGET_APP_IDENTIFIER],
       git_url: MATCH_GIT_URL,
       git_basic_authorization: Base64.strict_encode64(MATCH_GIT_BASIC_AUTHORIZATION),
       readonly: false,
