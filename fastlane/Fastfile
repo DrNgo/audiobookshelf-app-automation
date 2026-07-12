@@ -108,6 +108,10 @@ def apply_version_overrides(xcodeproj_path, marketing_version, build_number, tar
   project.save
 end
 
+def xcodeproj_has_target?(xcodeproj_path, target_name)
+  Xcodeproj::Project.open(xcodeproj_path).targets.any? { |t| t.name == target_name }
+end
+
 def ensure_temp_keychain(name, password)
   keychain_path = File.expand_path("~/Library/Keychains/#{name}-db")
   delete_keychain(name: name) if File.exist?(keychain_path)
@@ -135,11 +139,19 @@ def build_upstream_ipa
 
   api_key = build_api_key
 
-  # Provision both the app and its widget extension. Each needs its own App Store profile; the widget's
-  # must carry the shared App Group capability.
+  # The widget extension only exists in newer upstream checkouts. Provision/sign it only when the
+  # pinned upstream actually contains the target, so older pins keep building unchanged.
+  widget_present = xcodeproj_has_target?(XCODEPROJ_PATH, WIDGET_TARGET_NAME)
+  UI.message("AudiobookshelfWidget target #{widget_present ? 'present — will provision + sign it' : 'absent in this upstream pin — skipping widget signing'}")
+
+  app_identifiers = [DEVELOPER_APP_IDENTIFIER]
+  app_identifiers << WIDGET_APP_IDENTIFIER if widget_present
+
+  # Provision the app (and, when present, its widget extension). Each needs its own App Store profile;
+  # the widget's must carry the shared App Group capability.
   match(
     type: "appstore",
-    app_identifier: [DEVELOPER_APP_IDENTIFIER, WIDGET_APP_IDENTIFIER],
+    app_identifier: app_identifiers,
     git_url: MATCH_GIT_URL,
     git_basic_authorization: Base64.strict_encode64(MATCH_GIT_BASIC_AUTHORIZATION),
     readonly: false,
@@ -153,23 +165,29 @@ def build_upstream_ipa
   # cannot be assumed from the bundle identifier.
   profile_mapping = lane_context[SharedValues::MATCH_PROVISIONING_PROFILE_MAPPING]
   app_profile_specifier    = profile_mapping[DEVELOPER_APP_IDENTIFIER]
-  widget_profile_specifier = profile_mapping[WIDGET_APP_IDENTIFIER]
+  widget_profile_specifier = profile_mapping[WIDGET_APP_IDENTIFIER] if widget_present
 
-  apply_signing_overrides(
-    XCODEPROJ_PATH,
-    {
-      APP_TARGET_NAME => {
-        bundle_identifier: DEVELOPER_APP_IDENTIFIER,
-        team_id: developer_portal_team_id,
-        provisioning_profile_specifier: app_profile_specifier
-      },
-      WIDGET_TARGET_NAME => {
-        bundle_identifier: WIDGET_APP_IDENTIFIER,
-        team_id: developer_portal_team_id,
-        provisioning_profile_specifier: widget_profile_specifier
-      }
+  signing_by_target = {
+    APP_TARGET_NAME => {
+      bundle_identifier: DEVELOPER_APP_IDENTIFIER,
+      team_id: developer_portal_team_id,
+      provisioning_profile_specifier: app_profile_specifier
     }
-  )
+  }
+  version_targets = [APP_TARGET_NAME]
+  provisioning_profiles = { DEVELOPER_APP_IDENTIFIER => app_profile_specifier }
+
+  if widget_present
+    signing_by_target[WIDGET_TARGET_NAME] = {
+      bundle_identifier: WIDGET_APP_IDENTIFIER,
+      team_id: developer_portal_team_id,
+      provisioning_profile_specifier: widget_profile_specifier
+    }
+    version_targets << WIDGET_TARGET_NAME
+    provisioning_profiles[WIDGET_APP_IDENTIFIER] = widget_profile_specifier
+  end
+
+  apply_signing_overrides(XCODEPROJ_PATH, signing_by_target)
 
   marketing_version = upstream_marketing_version
   next_build_number = latest_testflight_build_number(
@@ -179,7 +197,7 @@ def build_upstream_ipa
     initial_build_number: 0
   ).to_i + 1
 
-  apply_version_overrides(XCODEPROJ_PATH, marketing_version, next_build_number, [APP_TARGET_NAME, WIDGET_TARGET_NAME])
+  apply_version_overrides(XCODEPROJ_PATH, marketing_version, next_build_number, version_targets)
 
   build_app(
     workspace: WORKSPACE_PATH,
@@ -187,10 +205,7 @@ def build_upstream_ipa
     configuration: "Release",
     export_method: "app-store",
     export_options: {
-      provisioningProfiles: {
-        DEVELOPER_APP_IDENTIFIER => app_profile_specifier,
-        WIDGET_APP_IDENTIFIER    => widget_profile_specifier
-      }
+      provisioningProfiles: provisioning_profiles
     },
     xcargs: "-allowProvisioningUpdates",
     output_directory: BUILD_OUTPUT_DIR,
