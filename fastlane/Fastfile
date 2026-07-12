@@ -16,9 +16,16 @@ DEVELOPER_APP_IDENTIFIER      = required_env("DEVELOPER_APP_IDENTIFIER")
 # The home/lock-screen widget ships as an app-extension target. Apple requires an extension's bundle
 # id to be prefixed by its host app's, so it defaults to "<app id>.widget" derived from the app-id
 # secret — never a hardcoded bundle id. Override with DEVELOPER_WIDGET_APP_IDENTIFIER if the portal's
-# widget App ID differs. Its App Store profile must carry the shared App Group capability
-# (group.com.audiobookshelf.app), which the app and widget use to exchange the server URL + token.
+# widget App ID differs. Its App Store profile must carry the shared App Group capability (see APP_GROUP
+# below), which the app and widget use to exchange the server URL + token.
 WIDGET_APP_IDENTIFIER         = required_env("DEVELOPER_WIDGET_APP_IDENTIFIER", "#{DEVELOPER_APP_IDENTIFIER}.widget")
+
+# The app + widget share data through an App Group. Upstream hardcodes "group.com.audiobookshelf.app";
+# rewrite it to one namespaced under this build's bundle id ("group.<app id>") so it belongs to this
+# team, overridable via DEVELOPER_APP_GROUP. App Group ids are globally unique across Apple, so the
+# upstream default can't be reused under a different team.
+UPSTREAM_APP_GROUP            = "group.com.audiobookshelf.app"
+APP_GROUP                     = required_env("DEVELOPER_APP_GROUP", "group.#{DEVELOPER_APP_IDENTIFIER}")
 
 APPLE_KEY_ID                  = required_env("APPLE_KEY_ID")
 APPLE_ISSUER_ID               = required_env("APPLE_ISSUER_ID")
@@ -112,6 +119,35 @@ def xcodeproj_has_target?(xcodeproj_path, target_name)
   Xcodeproj::Project.open(xcodeproj_path).targets.any? { |t| t.name == target_name }
 end
 
+# Rewrite the shared App Group id in the checked-out sources from the upstream default to this build's
+# group. The id lives in BOTH entitlements files and the Swift constant that reads the shared container,
+# and all must agree or the widget can't read what the app writes. Fails loudly if the upstream string
+# is gone (upstream renamed it) rather than silently shipping a mismatched group.
+def apply_app_group_override(ios_project_root, upstream_app_group, new_app_group)
+  return if new_app_group == upstream_app_group
+
+  targets = [
+    File.join(ios_project_root, "App", "App.entitlements"),
+    File.join(ios_project_root, "AudiobookshelfWidget", "AudiobookshelfWidget.entitlements"),
+    File.join(ios_project_root, "Shared", "util", "widget", "WidgetSharedCredentials.swift")
+  ]
+
+  rewritten = 0
+  targets.each do |path|
+    next unless File.exist?(path)
+    content = File.read(path)
+    next unless content.include?(upstream_app_group)
+    File.write(path, content.gsub(upstream_app_group, new_app_group))
+    rewritten += 1
+  end
+
+  if rewritten.zero?
+    UI.user_error!("App Group '#{upstream_app_group}' not found in any of #{targets.join(', ')} — upstream may have renamed it; update UPSTREAM_APP_GROUP.")
+  end
+
+  UI.message("Rewrote App Group #{upstream_app_group} -> #{new_app_group} in #{rewritten} file(s)")
+end
+
 def ensure_temp_keychain(name, password)
   keychain_path = File.expand_path("~/Library/Keychains/#{name}-db")
   delete_keychain(name: name) if File.exist?(keychain_path)
@@ -188,6 +224,9 @@ def build_upstream_ipa
   end
 
   apply_signing_overrides(XCODEPROJ_PATH, signing_by_target)
+
+  # Namespace the shared App Group under this build's bundle id (only widget-containing pins have it).
+  apply_app_group_override(IOS_PROJECT_ROOT, UPSTREAM_APP_GROUP, APP_GROUP) if widget_present
 
   marketing_version = upstream_marketing_version
   next_build_number = latest_testflight_build_number(
