@@ -41,6 +41,15 @@ You can also dispatch `deploy-testflight.yml` manually from the Actions tab, and
 | `MATCH_PASSWORD`                | Passphrase used to encrypt the Match repository contents. Pick any long random string the first time you run Match; remember it.                                                                                               |
 | `TEMP_KEYCHAIN_PASSWORD`        | Any long random string. Used as the password for the ephemeral keychain created on the CI runner.                                                                                                                              |
 
+### Optional overrides
+
+These are **not** required — the pipeline derives sensible defaults from `DEVELOPER_APP_IDENTIFIER`. Set them only if your portal identifiers differ from the defaults (see [Widget extension & App Group](#widget-extension--app-group)).
+
+| Secret / variable | Default | Purpose |
+| --- | --- | --- |
+| `DEVELOPER_WIDGET_APP_IDENTIFIER` | `<DEVELOPER_APP_IDENTIFIER>.widget` | Bundle id of the widget app-extension. Apple requires it to be a child of the host app id. |
+| `DEVELOPER_APP_GROUP` | `group.<DEVELOPER_APP_IDENTIFIER>` | Shared App Group id the app and widget use to exchange the server URL + token. |
+
 ## First-run setup
 
 Everything runs on GitHub — all setup is done through the repository settings and the Actions tab.
@@ -52,6 +61,28 @@ Everything runs on GitHub — all setup is done through the repository settings 
 3. **Confirm end-to-end.** Trigger the **Deploy to TestFlight** workflow manually to build the currently pinned `.upstream-version` and upload it to TestFlight.
 
 Once step 3 succeeds, the pipeline is fully autonomous: upstream releases deploy on their own, builds refresh on schedule, and signing material self-rotates.
+
+## Widget extension & App Group
+
+Newer upstream commits embed an **`AudiobookshelfWidget`** app-extension target (the home/lock-screen widget). It runs as a separate process and talks to the app through a shared **App Group** (the app writes the server URL + access token; the widget reads them). An App Store build must therefore sign the extension in addition to the app.
+
+The Fastfile handles this automatically and **only when the pinned upstream actually contains the target** — older pins without the widget build exactly as before (the widget signing is skipped, logged as `AudiobookshelfWidget target absent in this upstream pin`). When the target is present, the build:
+
+- provisions and signs the widget under its own bundle id — `<DEVELOPER_APP_IDENTIFIER>.widget` by default (Apple requires an extension id to be a child of the host app id), or `DEVELOPER_WIDGET_APP_IDENTIFIER` if set;
+- rewrites the shared App Group id in the checkout from the upstream default (`group.com.audiobookshelf.app`) to **`group.<DEVELOPER_APP_IDENTIFIER>`** (or `DEVELOPER_APP_GROUP`). App Group ids are globally unique across Apple, so the upstream default can't be reused under a different team. The rewrite touches both entitlements files **and** the Swift constant that reads the container — all must agree, and the build fails loudly if the upstream string ever moves;
+- stamps the widget with the same marketing version + build number as the app (App Store Connect rejects an extension whose version doesn't match its host);
+- exports both provisioning profiles.
+
+### One-time portal setup (required before the first widget-containing build)
+
+Match and the App Store Connect API key create certs/profiles but **cannot create or associate an App Group** — the public API has no App Group CRUD, and the legacy portal path needs an Apple ID session. So do this once, manually, in the [Apple Developer portal](https://developer.apple.com/account/resources):
+
+1. **Register the widget App ID** `<DEVELOPER_APP_IDENTIFIER>.widget` (Identifiers → App IDs). Match will also create it on first run, but registering it up front is cleaner.
+2. **Create the App Group** `group.<DEVELOPER_APP_IDENTIFIER>` (Identifiers → App Groups).
+3. **Enable the App Groups capability** on **both** App IDs (the app and the `.widget`) and **associate** the group to each.
+4. **Regenerate profiles** so they carry the entitlement: run the **Rotate certificates** workflow (or `fastlane match appstore --force`). It provisions both App IDs.
+
+If this isn't done, the first widget-containing build fails at signing/export with a provisioning **entitlement mismatch** (the profile lacks the App Group), or `match` errors that it can't find the widget App ID. Once done, it's stable — the group and capability don't change between releases.
 
 ## Secret and certificate rotation
 
